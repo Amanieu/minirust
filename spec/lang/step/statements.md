@@ -30,8 +30,8 @@ impl<M: Memory> Machine<M> {
     }
 
     fn eval_statement(&mut self, Statement::Assign { destination, source }: Statement) -> NdResult {
-        let (place, ty) = self.eval_place(destination)?;
         let (val, _) = self.eval_value(source)?;
+        let (place, ty) = self.eval_place(destination, true)?;
         self.place_store(place, val, ty)?;
 
         ret(())
@@ -48,7 +48,7 @@ This means `let _ = *danling_ptr;` is legal.
 ```rust
 impl<M: Memory> Machine<M> {
     fn eval_statement(&mut self, Statement::PlaceMention(place): Statement) -> NdResult {
-        self.eval_place(place)?;
+        self.eval_place(place, false)?;
         ret(())
     }
 }
@@ -59,7 +59,7 @@ impl<M: Memory> Machine<M> {
 ```rust
 impl<M: Memory> Machine<M> {
     fn eval_statement(&mut self, Statement::SetDiscriminant { destination, value }: Statement) -> NdResult {
-        let (place, Type::Enum { variants, .. }) = self.eval_place(destination)? else {
+        let (place, Type::Enum { variants, .. }) = self.eval_place(destination, true)? else {
             panic!("setting the discriminant type of a non-enum contradicts well-formedness");
         };
         if !place.aligned {
@@ -118,7 +118,7 @@ impl<M: Memory> Machine<M> {
     }
 
     fn eval_statement(&mut self, Statement::Validate { place, fn_entry }: Statement) -> NdResult {
-        let (place, ty) = self.eval_place(place)?;
+        let (place, ty) = self.eval_place(place, false)?;
 
         // WF ensures all valid expressions are sized, so we can invoke the load.
         // This also ensures the value in the place satsifies the language invariant.
@@ -145,7 +145,7 @@ impl<M: Memory> ConcurrentMemory<M> {
 
 impl<M: Memory> Machine<M> {
     fn eval_statement(&mut self, Statement::Deinit { place }: Statement) -> NdResult {
-        let (p, ty) = self.eval_place(place)?;
+        let (p, ty) = self.eval_place(place, true)?;
         if !p.aligned {
             throw_ub!("de-initializing a place based on a misaligned pointer");
         }
@@ -159,42 +159,27 @@ impl<M: Memory> Machine<M> {
 
 ## StorageDead and StorageLive
 
-These operations (de)allocate the memory backing a local.
+These operations mark a local as live or dead, freeing any backing storage they may have.
 
 ```rust
-impl<M: Memory> StackFrame<M> {
-    fn storage_live(&mut self, mem: &mut ConcurrentMemory<M>, local: LocalName) -> NdResult {
-        // First remove the old storage, if any.
-        // This means the same address may be re-used for the new stoage.
-        self.storage_dead(mem, local)?;
-        // Then allocate the new storage.
-        let pointee_size = self.func.locals[local].layout::<M::T>().expect_size("WF ensures all locals are sized");
-        let pointee_align = self.func.locals[local].layout::<M::T>().expect_align("WF ensures all locals are sized");
-        let ptr = mem.allocate(AllocationKind::Stack, pointee_size, pointee_align)?;
-        self.locals.insert(local, ptr);
-        ret(())
-    }
-
-    fn storage_dead(&mut self, mem: &mut ConcurrentMemory<M>, local: LocalName) -> NdResult {
-        let pointee_size = self.func.locals[local].layout::<M::T>().expect_size("WF ensures all locals are sized");
-        let pointee_align = self.func.locals[local].layout::<M::T>().expect_align("WF ensures all locals are sized");
-        if let Some(ptr) = self.locals.remove(local) {
-            mem.deallocate(ptr, AllocationKind::Stack, pointee_size, pointee_align)?;
-        }
-        ret(())
-    }
-}
-
 impl<M: Memory> Machine<M> {
     fn eval_statement(&mut self, Statement::StorageLive(local): Statement) -> NdResult {
         self.try_mutate_cur_frame(|frame, mem| {
-            frame.storage_live(mem, local)
+            if let LocalState::Allocated(ptr) = frame.locals[local] {
+                frame.free_local(mem, local, ptr)?;
+            }
+            frame.locals.insert(local, LocalState::Live);
+            ret(())
         })
     }
 
     fn eval_statement(&mut self, Statement::StorageDead(local): Statement) -> NdResult {
         self.try_mutate_cur_frame(|frame, mem| {
-            frame.storage_dead(mem, local)
+            if let LocalState::Allocated(ptr) = frame.locals[local] {
+                frame.free_local(mem, local, ptr)?;
+            }
+            frame.locals.insert(local, LocalState::Dead);
+            ret(())
         })
     }
 }

@@ -399,6 +399,12 @@ impl ValueExpr {
                 ensure_wf(val_ty.layout::<T>().is_sized(), "ValueExpr::Load: unsized value type")?;
                 val_ty
             }
+            MoveLocal { local } => {
+                match locals.get(local) {
+                    None => throw_ill_formed!("ValueExpr::MoveLocal: unknown local name"),
+                    Some(local_ty) => local_ty,
+                }
+            }
             AddrOf { target, ptr_ty } => {
                 ptr_ty.check_wf::<T>(prog)?;
                 let target_ty = target.check_wf::<T>(locals, prog)?;

@@ -399,8 +399,15 @@ impl<'cx, 'tcx> FnCtxt<'cx, 'tcx> {
             smir::Operand::Constant(c) => self.translate_const_smir(&c.const_, span),
             smir::Operand::Copy(place) =>
                 ValueExpr::Load { source: GcCow::new(self.translate_place_smir(place, span)) },
-            smir::Operand::Move(place) =>
-                ValueExpr::Load { source: GcCow::new(self.translate_place_smir(place, span)) },
+            smir::Operand::Move(place) => {
+                // If the place has no projections then we can emit a MoveLocal.
+                if place.projection.is_empty() {
+                    let local = self.local_name_map[&place.local.into()];
+                    ValueExpr::MoveLocal { local }
+                } else {
+                    ValueExpr::Load { source: GcCow::new(self.translate_place_smir(place, span)) }
+                }
+            }
         }
     }
 

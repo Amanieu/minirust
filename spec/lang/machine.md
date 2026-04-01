@@ -56,8 +56,8 @@ struct StackFrame<M: Memory> {
     /// The function this stack frame belongs to.
     func: Function,
 
-    /// For each live local, the location in memory where its value is stored.
-    locals: Map<LocalName, ThinPointer<M::Provenance>>,
+    /// Holds the current state of each local in a function.
+    locals: Map<LocalName, LocalState<M>>,
 
     /// Expresses what happens after the callee (this function) returns or resumes unwinding.
     stack_pop_action: StackPopAction<M>,
@@ -90,6 +90,18 @@ enum StackPopAction<M: Memory> {
         /// The caller type already been checked to be suitably compatible with the callee return type.
         ret_val_ptr: ThinPointer<M::Provenance>,
     },
+}
+
+/// Defines the possible states for a local.
+enum LocalState<M: Memory> {
+    /// The local is dead.
+    Dead,
+
+    /// The local is live, but has no allocation.
+    Live,
+
+    /// The local is live and has allocated backing storage.
+    Allocated(ThinPointer<M::Provenance>),
 }
 ```
 
@@ -298,6 +310,24 @@ impl<M: Memory> StackFrame<M> {
     fn jump_to_block(&mut self, b: BbName) {
         self.next_block = b;
         self.next_stmt = Int::ZERO;
+    }
+
+    fn allocate_local(&mut self, mem: &mut ConcurrentMemory<M>, local: LocalName) -> NdResult<ThinPointer<M::Provenance>> {
+        let pointee_size = self.func.locals[local].layout::<M::T>()
+            .expect_size("WF ensures all locals are sized");
+        let pointee_align = self.func.locals[local].layout::<M::T>()
+            .expect_align("WF ensures all locals are sized");
+        let ptr = mem.allocate(AllocationKind::Stack, pointee_size, pointee_align)?;
+        ret(ptr)
+    }
+
+    fn free_local(&mut self, mem: &mut ConcurrentMemory<M>, local: LocalName, ptr: ThinPointer<M::Provenance>) -> Result {
+        let pointee_size = self.func.locals[local].layout::<M::T>()
+            .expect_size("WF ensures all locals are sized");
+        let pointee_align = self.func.locals[local].layout::<M::T>()
+            .expect_align("WF ensures all locals are sized");
+        mem.deallocate(ptr, AllocationKind::Stack, pointee_size, pointee_align)?;
+        ret(())
     }
 }
 ```

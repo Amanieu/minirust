@@ -121,6 +121,10 @@ pub(super) fn fmt_value_expr(v: ValueExpr, comptypes: &mut Vec<CompType>) -> Fmt
             let source = fmt_place_expr(source, comptypes).to_string();
             FmtExpr::Atomic(format!("load({source})"))
         }
+        ValueExpr::MoveLocal { local } => {
+            let local = fmt_local_name(local).to_string();
+            FmtExpr::Atomic(format!("move({local})"))
+        }
         ValueExpr::AddrOf { target, ptr_ty: PtrType::Raw { .. } } => {
             let target = target.extract();
             let target = fmt_place_expr(target, comptypes).to_atomic_string();

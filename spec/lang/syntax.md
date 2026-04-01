@@ -53,6 +53,11 @@ pub enum ValueExpr {
         #[specr::indirection]
         source: PlaceExpr,
     },
+    /// Loads the value of a local and then frees its allocation.
+    MoveLocal {
+        /// The local being moved from.
+        local: LocalName,
+    },
     /// Create a pointer (raw pointer or reference) to a place.
     AddrOf {
         /// The place to create a pointer to.
@@ -311,9 +316,9 @@ pub enum Statement {
     Deinit {
         place: PlaceExpr,
     },
-    /// Allocate the backing store for this local.
+    /// Marks this local as live, deallocating its backing store if it had one.
     StorageLive(LocalName),
-    /// Deallocate the backing store for this local.
+    /// Marks this local as dead, deallocating its backing store if it had one.
     StorageDead(LocalName),
 }
 
@@ -502,7 +507,7 @@ pub enum BbKind {
     Regular,
     /// Cleanup blocks may use `ResumeUnwind` but not `Return` or `StartUnwind`.
     Cleanup,
-    /// Catch blocks may use neither `Return` nor `ResumeUnwind` nor `StartUnwind`. 
+    /// Catch blocks may use neither `Return` nor `ResumeUnwind` nor `StartUnwind`.
     /// Catch blocks may branch to regular blocks.
     Catch,
     /// `Terminate` blocks may use neither `Return` nor `ResumeUnwind` nor `StartUnwind`.

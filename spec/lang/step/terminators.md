@@ -163,7 +163,7 @@ impl<M: Memory> Machine<M> {
                 self.eval_value(value)?
             }
             ArgumentExpr::InPlace(place) => {
-                let (place, ty) = self.eval_place(place)?;
+                let (place, ty) = self.eval_place(place, false)?;
                 // Fetch the actual value, WF ensures all Call arguments are sized.
                 let value = self.place_load(place, ty)?;
                 // Make sure we can use it in-place.
@@ -193,11 +193,14 @@ impl<M: Memory> Machine<M> {
             extra: M::new_call(),
         };
 
-        // Allocate all the initially live locals.
-        frame.storage_live(&mut self.mem, func.ret)?;
-        for arg_local in func.args {
-            frame.storage_live(&mut self.mem, arg_local)?;
+        // Initialize all locals as dead.
+        for local in func.locals.keys() {
+            frame.locals.insert(local, LocalState::Dead);
         }
+
+        // Initialize the return place as live, but not allocated. It must be
+        // allocated by a write before returning.
+        frame.locals.insert(func.ret, LocalState::Live);
 
         // Check calling convention.
         if caller_conv != func.calling_convention {
@@ -218,17 +221,22 @@ impl<M: Memory> Machine<M> {
             if !check_abi_compatibility(caller_ty, func.locals[callee_local]) {
                 throw_ub!("call ABI violation: argument types are not compatible");
             }
+
+            // Allocate a local for the argument.
+            let ptr = frame.allocate_local(&mut self.mem, callee_local)?;
+            frame.locals.insert(callee_local, LocalState::Allocated(ptr));
+
             // Copy the value at caller (source) type -- that's necessary since it is the type we did the load at (in `eval_argument`).
             // We know the types have compatible layout so this will fit into the allocation.
             // The local is freshly allocated so there should be no reason the store can fail.
             let align = caller_ty.layout::<M::T>().expect_align("WF ensures function arguments are sized");
-            self.typed_store(frame.locals[callee_local], caller_val, caller_ty, align, Atomicity::None).unwrap();
+            self.typed_store(ptr, caller_val, caller_ty, align, Atomicity::None).unwrap();
         }
 
         ret(frame)
     }
 
-    fn eval_call( 
+    fn eval_call(
         &mut self,
         callee: Function,
         caller_conv: CallingConvention,
@@ -262,13 +270,8 @@ impl<M: Memory> Machine<M> {
         &mut self,
         Terminator::Call { callee, calling_convention: caller_conv, arguments, ret: ret_expr, next_block, unwind_block }: Terminator
     ) -> NdResult {
-        // First evaluate the return place. (Left-to-right!)
-        let (ret_place, ret_ty) = self.eval_place(ret_expr)?;
-        // FIXME: should we care about `caller_ret_place.align`?
-        // Make sure we can use it in-place.
-        self.prepare_for_inplace_passing(ret_place, ret_ty)?;
 
-        // Then evaluate the function that will be called.
+        // Evaluate the function that will be called.
         let (callee_val, _) = self.eval_value(callee)?;
         let callee = self.fn_from_ptr(callee_val)?;
 
@@ -276,6 +279,12 @@ impl<M: Memory> Machine<M> {
         // FIXME: this means if an argument reads from `ret_expr`, the contents
         // of that have already been de-initialized. Is that the intended behavior?
         let arguments = arguments.try_map(|arg| self.eval_argument(arg))?;
+
+        // Evaluate the return place last.
+        let (ret_place, ret_ty) = self.eval_place(ret_expr, true)?;
+        // FIXME: should we care about `caller_ret_place.align`?
+        // Make sure we can use it in-place.
+        self.prepare_for_inplace_passing(ret_place, ret_ty)?;
 
         self.eval_call(
             callee,
@@ -330,11 +339,16 @@ impl<M: Memory> Machine<M> {
         // we copy at the callee (source) type -- the one place where we ensure the return value matches that type.
         let callee_ty = frame.func.locals[frame.func.ret];
         let align = callee_ty.layout::<M::T>().expect_align("the return value is a local and thus sized");
-        let ret_val = self.typed_load(frame.locals[frame.func.ret], callee_ty, align, Atomicity::None)?;
+        let LocalState::Allocated(ptr) = frame.locals[frame.func.ret] else {
+            throw_ub!("return place is not allocated on return");
+        };
+        let ret_val = self.typed_load(ptr, callee_ty, align, Atomicity::None)?;
 
         // Deallocate everything.
-        while let Some(local) = frame.locals.keys().next() {
-            frame.storage_dead(&mut self.mem, local)?;
+        for (local, state) in frame.locals.iter() {
+            if let LocalState::Allocated(ptr) = state {
+                frame.free_local(&mut self.mem, local, ptr)?;
+            }
         }
 
         // Inform the memory model that this call has ended.
@@ -427,8 +441,10 @@ impl<M: Memory> Machine<M> {
         );
 
         // Deallocate everything.
-        while let Some(local) = frame.locals.keys().next() {
-            frame.storage_dead(&mut self.mem, local)?;
+        for (local, state) in frame.locals.iter() {
+            if let LocalState::Allocated(ptr) = state {
+                frame.free_local(&mut self.mem, local, ptr)?;
+            }
         }
 
         // Inform the memory model that this call has ended.
@@ -463,11 +479,11 @@ impl<M: Memory> Machine<M> {
         &mut self,
         Terminator::Intrinsic { intrinsic, arguments, ret: ret_expr, next_block }: Terminator
     ) -> NdResult {
-        // First evaluate return place (left-to-right evaluation).
-        let (ret_place, ret_ty) = self.eval_place(ret_expr)?;
-
         // Evaluate all arguments.
         let arguments = arguments.try_map(|arg| self.eval_value(arg))?;
+
+        // Evaluate return place last.
+        let (ret_place, ret_ty) = self.eval_place(ret_expr, true)?;
 
         // Run the actual intrinsic.
         let value = self.eval_intrinsic(intrinsic, arguments, ret_ty)?;
